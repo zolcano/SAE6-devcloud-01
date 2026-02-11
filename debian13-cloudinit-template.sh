@@ -47,8 +47,9 @@ qm set "${VMID}" --ide2 "${STORAGE}:cloudinit"
 echo "=== Configuration de la console série ==="
 qm set "${VMID}" --serial0 socket --vga serial0
 
-echo "=== Conversion en template ==="
-qm template "${VMID}"
+echo "=== Configuration de l'agent ==="
+qm set "${VMID}" --agent enabled=1
 
-echo "=== Template Debian 13 cloud-init créé : VMID=${VMID}, nom=${VMNAME} ==="
+echo "=== VM Template Debian 13 cloud-init créé : VMID=${VMID}, nom=${VMNAME} ==="
+echo "installez qemu-guest-agent sur la VM puis convertisse en template"
 

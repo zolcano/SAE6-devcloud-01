@@ -41,6 +41,9 @@ locals {
   vm_storage  = "local-lvm"         # datastore pour le disque
   vm_bridge   = "vmbr0"             # bridge réseau
   vm_vlan     = 0                   # VLAN si besoin (0 = aucun)
+
+  # VMIDs Proxmox souhaités pour les 4 VMs
+  vm_ids = [200, 201, 202, 203]
 }
 
 resource "proxmox_virtual_environment_vm" "debian13" {
@@ -48,6 +51,9 @@ resource "proxmox_virtual_environment_vm" "debian13" {
 
   name = "${local.vm_name_prefix}-${count.index + 1}"
   node_name = local.vm_node
+
+  # VMID Proxmox explicite pour chaque VM
+  vm_id = local.vm_ids[count.index]
 
   clone {
     vm_id = local.vm_template
@@ -95,3 +101,18 @@ resource "proxmox_virtual_environment_vm" "debian13" {
   }
 }
 
+# Outputs pratiques pour Ansible
+output "debian13_vm_ids" {
+  description = "VMIDs Proxmox des VMs Debian 13"
+  value       = proxmox_virtual_environment_vm.debian13[*].vm_id
+}
+
+output "debian13_ipv4_addresses" {
+  description = "Adresses IPv4 (DHCP) des VMs Debian 13"
+  value       = proxmox_virtual_environment_vm.debian13[*].ipv4_addresses
+}
+
+output "debian13_ipv6_addresses" {
+  description = "Adresses IPv6 (DHCP) des VMs Debian 13"
+  value       = proxmox_virtual_environment_vm.debian13[*].ipv6_addresses
+}
