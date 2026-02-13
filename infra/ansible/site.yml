@@ -1,7 +1,7 @@
 ---
-# 1) Pré-requis Docker sur toutes les VMs
-- name: Install Docker on all nodes
-  hosts: gitlab:swarm_manager:swarm_workers
+# 1) Pré-requis Docker sur les nœuds Swarm (hors GitLab)
+- name: Install Docker on Swarm nodes
+  hosts: swarm_manager:swarm_workers
   become: true
   tasks:
     - name: Install required packages
@@ -53,56 +53,52 @@
       apt:
         update_cache: true
 
-# 2) GitLab + registry sur la VM "code"
+# 2) GitLab + registry installés en dur sur la VM "code"
 - name: Deploy GitLab (code management node)
   hosts: gitlab
   become: true
   vars:
     gitlab_external_url: "http://{{ ansible_host }}"
-    gitlab_data_dir: "/srv/gitlab"
   tasks:
-    - name: Create GitLab data directories
-      file:
-        path: "{{ item }}"
-        state: directory
-        owner: root
-        group: root
+    - name: Install required packages for GitLab repository
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - openssh-server
+          - tzdata
+          - perl
+        state: present
+        update_cache: true
+
+    - name: Download GitLab Omnibus installer script
+      get_url:
+        url: https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh
+        dest: /tmp/gitlab_install.sh
         mode: "0755"
-      loop:
-        - "{{ gitlab_data_dir }}/config"
-        - "{{ gitlab_data_dir }}/logs"
-        - "{{ gitlab_data_dir }}/data"
 
-    - name: Create GitLab docker-compose file
+    - name: Run GitLab Omnibus installer script
+      command: bash /tmp/gitlab_install.sh
+
+    - name: Install GitLab CE package
+      apt:
+        name: gitlab-ce
+        state: present
+        update_cache: true
+
+    - name: Configure GitLab CE (external URL + registry)
       copy:
-        dest: /root/gitlab-docker-compose.yml
-        mode: "0644"
+        dest: /etc/gitlab/gitlab.rb
+        mode: "0600"
         content: |
-          version: "3.9"
-          services:
-            gitlab:
-              image: gitlab/gitlab-ce:latest
-              hostname: gitlab
-              restart: always
-              ports:
-                - "80:80"
-                - "443:443"
-                - "2222:22"
-              volumes:
-                - "{{ gitlab_data_dir }}/config:/etc/gitlab"
-                - "{{ gitlab_data_dir }}/logs:/var/log/gitlab"
-                - "{{ gitlab_data_dir }}/data:/var/opt/gitlab"
-              environment:
-                GITLAB_OMNIBUS_CONFIG: |
-                  external_url '{{ gitlab_external_url }}'
-                  gitlab_rails['gitlab_shell_ssh_port'] = 2222
-                  registry_external_url 'http://{{ ansible_host }}:5050'
-                  registry['enable'] = true
-                  registry['registry_http_addr'] = "0.0.0.0:5050"
+          external_url "{{ gitlab_external_url }}"
+          gitlab_rails['gitlab_shell_ssh_port'] = 2222
+          registry_external_url "http://{{ ansible_host }}:5050"
+          registry['enable'] = true
+          registry['registry_http_addr'] = "0.0.0.0:5050"
 
-    - name: Start GitLab with Docker Compose
-      ansible.builtin.command: >
-        docker compose -f /root/gitlab-docker-compose.yml up -d
+    - name: Reconfigure GitLab
+      command: gitlab-ctl reconfigure
 
 # 3) Init Docker Swarm sur le manager
 - name: Init Docker Swarm manager
@@ -126,7 +122,44 @@
       set_fact:
         swarm_worker_join_token: "{{ worker_token.stdout }}"
 
-# 4) Join des workers au Swarm
+# 4) Installation de gitlab-runner sur le manager Swarm
+- name: Install gitlab-runner on Swarm manager
+  hosts: swarm_manager
+  become: true
+  tasks:
+    - name: Install prerequisites for GitLab Runner repository
+      apt:
+        name:
+          - curl
+          - ca-certificates
+        state: present
+        update_cache: true
+
+    - name: Add GitLab Runner GPG key
+      ansible.builtin.get_url:
+        url: https://packages.gitlab.com/runner/gitlab-runner/gpgkey
+        dest: /usr/share/keyrings/gitlab-runner.gpg
+        mode: "0644"
+
+    - name: Add GitLab Runner repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/gitlab-runner.gpg] https://packages.gitlab.com/runner/gitlab-runner/debian/ bookworm main"
+        state: present
+        filename: gitlab_runner
+
+    - name: Install GitLab Runner
+      ansible.builtin.apt:
+        name: gitlab-runner
+        state: present
+        update_cache: true
+
+    - name: Install gitlab-runner package
+      apt:
+        name: gitlab-runner
+        state: present
+        update_cache: true
+
+# 5) Join des workers au Swarm
 - name: Join Swarm workers
   hosts: swarm_workers
   become: true
@@ -143,8 +176,7 @@
       failed_when: join_result.rc not in [0, 1]
       changed_when: join_result.rc == 0
 
-# 5) Déploiement de l'application sur le Swarm
-#    (à adapter à ton projet : stack Docker depuis l'image de la registry GitLab)
+# 6) Déploiement de l'application sur le Swarm
 - name: Deploy application stack on Swarm
   hosts: swarm_manager
   become: true
@@ -168,4 +200,3 @@
     - name: Deploy stack
       command: >
         docker stack deploy -c {{ compose_file }} {{ stack_name }}
-
