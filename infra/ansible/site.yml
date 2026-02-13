@@ -168,3 +168,4 @@
     - name: Deploy stack
       command: >
         docker stack deploy -c {{ compose_file }} {{ stack_name }}
+

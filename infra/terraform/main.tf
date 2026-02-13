@@ -8,10 +8,15 @@ terraform {
 }
 
 provider "proxmox" {
-  endpoint = "https://10.242.178.215:8006/api2/json"
+  endpoint = "https://${var.pm_api_host}:8006/api2/json"
   insecure = true
 
   api_token = "${var.pm_api_token_id}=${var.pm_api_token_secret}"
+}
+
+variable "pm_api_host" {
+  description = "Nom d'hôte ou IP du serveur Proxmox (sans schéma, ex: 10.242.178.215)"
+  type        = string
 }
 
 variable "pm_api_token_id" {
@@ -40,21 +45,15 @@ locals {
   vm_count       = 4
   vm_name_prefix = "sae6"
 
-  # À adapter à ton infra Proxmox :
-  vm_node     = "sae"               # nom du nœud Proxmox
-  vm_template = 8001                # VMID du template Debian 13 cloud-init
-  vm_storage  = "local-lvm"         # datastore pour le disque
-  vm_bridge   = "vmbr0"             # bridge réseau
-  vm_vlan     = 0                   # VLAN si besoin (0 = aucun)
+ 
+  vm_node     = "sae"              
+  vm_template = 8001               
+  vm_storage  = "local-lvm"        
+  vm_bridge   = "vmbr0"            
+  vm_vlan     = 0                  
 
   # VMIDs Proxmox souhaités pour les 4 VMs
   vm_ids = [200, 201, 202, 203]
-
-  # Rôle de chaque VM :
-  #  - code   : GitLab + registry + CI/CD
-  #  - infra1 : orchestrateur (ex: k3s ou Docker Swarm)
-  #  - infra2 : nœud d'infra / worker
-  #  - infra3 : nœud d'infra / worker
   vm_roles = ["code", "infra1", "infra2", "infra3"]
 }
 
@@ -62,10 +61,9 @@ resource "proxmox_virtual_environment_vm" "debian13" {
   count = local.vm_count
 
   # Exemple de noms : sae6-code, sae6-infra1, sae6-infra2, sae6-infra3
-  name = "${local.vm_name_prefix}-${local.vm_roles[count.index]}"
+  name      = "${local.vm_name_prefix}-${local.vm_roles[count.index]}"
   node_name = local.vm_node
 
-  # VMID Proxmox explicite pour chaque VM
   vm_id = local.vm_ids[count.index]
 
   clone {
@@ -89,9 +87,8 @@ resource "proxmox_virtual_environment_vm" "debian13" {
   }
 
   network_device {
-    bridge  = local.vm_bridge
-    model   = "virtio"
-    # vlan_id = local.vm_vlan  # décommente si tu utilises un VLAN spécifique
+    bridge = local.vm_bridge
+    model  = "virtio"
   }
 
   initialization {
@@ -116,13 +113,14 @@ resource "proxmox_virtual_environment_vm" "debian13" {
   }
 }
 
-# Outputs pratiques pour Ansible
+# Outputs pour Ansible
+# VMIDs Proxmox des VMs Debian 13
 output "debian13_vm_ids" {
   description = "VMIDs Proxmox des VMs Debian 13"
   value       = proxmox_virtual_environment_vm.debian13[*].vm_id
 }
 
-# VM GitLab / gestion de code (rôle \"code\")
+# VM GitLab / gestion de code (rôle "code")
 output "code_ipv4" {
   description = "Adresse IPv4 de la VM de gestion de code (GitLab)"
   value       = proxmox_virtual_environment_vm.debian13[0].ipv4_addresses[1]
@@ -137,3 +135,4 @@ output "infra_ipv4" {
     proxmox_virtual_environment_vm.debian13[3].ipv4_addresses[1],
   ]
 }
+

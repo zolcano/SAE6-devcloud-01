@@ -2,13 +2,16 @@
 
 set -euo pipefail
 
-# Variables (à adapter si besoin)
+# Script de création d'un template Debian 13 cloud-init sur Proxmox.
+# À exécuter directement sur le nœud Proxmox.
+
+# Variables (surchageables par l'environnement)
 VMID="${VMID:-8001}"
 VMNAME="${VMNAME:-debian13-cloudinit}"
 STORAGE="${STORAGE:-local-lvm}"
 BRIDGE="${BRIDGE:-vmbr0}"
-IMAGE_PATH="/root/debian-13-genericcloud-amd64.qcow2"
-IMAGE_URL="https://cdimage.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+IMAGE_PATH="${IMAGE_PATH:-/root/debian-13-genericcloud-amd64.qcow2}"
+IMAGE_URL="${IMAGE_URL:-https://cdimage.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2}"
 
 echo "=== Téléchargement de l'image cloud-init Debian 13 (amd64) ==="
 if [ ! -f "${IMAGE_PATH}" ]; then
@@ -50,6 +53,6 @@ qm set "${VMID}" --serial0 socket --vga serial0
 echo "=== Configuration de l'agent ==="
 qm set "${VMID}" --agent enabled=1
 
-echo "=== VM Template Debian 13 cloud-init créé : VMID=${VMID}, nom=${VMNAME} ==="
-echo "installez qemu-guest-agent sur la VM puis convertisse en template"
+echo "=== VM Template Debian 13 cloud-init créée : VMID=${VMID}, nom=${VMNAME} ==="
+echo "Démarre la VM, installe 'qemu-guest-agent', puis convertis-la en template dans l'interface Proxmox."
 
