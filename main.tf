@@ -31,9 +31,14 @@ variable "vm_root_password" {
   sensitive   = true
 }
 
+variable "admin_ssh_public_key" {
+  description = "Clé publique SSH pour l'utilisateur admin"
+  type        = string
+}
+
 locals {
   vm_count       = 4
-  vm_name_prefix = "debian13"
+  vm_name_prefix = "sae6"
 
   # À adapter à ton infra Proxmox :
   vm_node     = "sae"               # nom du nœud Proxmox
@@ -44,12 +49,20 @@ locals {
 
   # VMIDs Proxmox souhaités pour les 4 VMs
   vm_ids = [200, 201, 202, 203]
+
+  # Rôle de chaque VM :
+  #  - code   : GitLab + registry + CI/CD
+  #  - infra1 : orchestrateur (ex: k3s ou Docker Swarm)
+  #  - infra2 : nœud d'infra / worker
+  #  - infra3 : nœud d'infra / worker
+  vm_roles = ["code", "infra1", "infra2", "infra3"]
 }
 
 resource "proxmox_virtual_environment_vm" "debian13" {
   count = local.vm_count
 
-  name = "${local.vm_name_prefix}-${count.index + 1}"
+  # Exemple de noms : sae6-code, sae6-infra1, sae6-infra2, sae6-infra3
+  name = "${local.vm_name_prefix}-${local.vm_roles[count.index]}"
   node_name = local.vm_node
 
   # VMID Proxmox explicite pour chaque VM
@@ -65,7 +78,8 @@ resource "proxmox_virtual_environment_vm" "debian13" {
   }
 
   memory {
-    dedicated = 8192
+    # 16 Go pour la VM "code" (GitLab), 8 Go pour les autres
+    dedicated = count.index == 0 ? 16384 : 8192
   }
 
   disk {
@@ -84,8 +98,9 @@ resource "proxmox_virtual_environment_vm" "debian13" {
     datastore_id = local.vm_storage
 
     user_account {
-      username = "root"
+      username = "admin"
       password = var.vm_root_password
+      keys     = [var.admin_ssh_public_key]
     }
 
     # Configuration réseau: DHCP pour IPv4 et IPv6
@@ -107,12 +122,18 @@ output "debian13_vm_ids" {
   value       = proxmox_virtual_environment_vm.debian13[*].vm_id
 }
 
-output "debian13_ipv4_addresses" {
-  description = "Adresses IPv4 (DHCP) des VMs Debian 13"
-  value       = proxmox_virtual_environment_vm.debian13[*].ipv4_addresses
+# VM GitLab / gestion de code (rôle \"code\")
+output "code_ipv4" {
+  description = "Adresse IPv4 de la VM de gestion de code (GitLab)"
+  value       = proxmox_virtual_environment_vm.debian13[0].ipv4_addresses[1]
 }
 
-output "debian13_ipv6_addresses" {
-  description = "Adresses IPv6 (DHCP) des VMs Debian 13"
-  value       = proxmox_virtual_environment_vm.debian13[*].ipv6_addresses
+# VMs d'infrastructure (rôles infra1, infra2, infra3)
+output "infra_ipv4" {
+  description = "Adresses IPv4 des VMs d'infrastructure"
+  value = [
+    proxmox_virtual_environment_vm.debian13[1].ipv4_addresses[1],
+    proxmox_virtual_environment_vm.debian13[2].ipv4_addresses[1],
+    proxmox_virtual_environment_vm.debian13[3].ipv4_addresses[1],
+  ]
 }

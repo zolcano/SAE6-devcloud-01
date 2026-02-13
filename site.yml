@@ -1,0 +1,170 @@
+---
+# 1) Pré-requis Docker sur toutes les VMs
+- name: Install Docker on all nodes
+  hosts: gitlab:swarm_manager:swarm_workers
+  become: true
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: true
+
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker GPG key
+      ansible.builtin.shell: |
+        curl -fsSL https://download.docker.com/linux/debian/gpg \
+          | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+    - name: Add Docker APT repository
+      copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: |
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian trixie stable
+      notify: apt update
+
+    - name: Install Docker engine + compose plugin
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Ensure Docker service is running
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+  handlers:
+    - name: apt update
+      apt:
+        update_cache: true
+
+# 2) GitLab + registry sur la VM "code"
+- name: Deploy GitLab (code management node)
+  hosts: gitlab
+  become: true
+  vars:
+    gitlab_external_url: "http://{{ ansible_host }}"
+    gitlab_data_dir: "/srv/gitlab"
+  tasks:
+    - name: Create GitLab data directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ gitlab_data_dir }}/config"
+        - "{{ gitlab_data_dir }}/logs"
+        - "{{ gitlab_data_dir }}/data"
+
+    - name: Create GitLab docker-compose file
+      copy:
+        dest: /root/gitlab-docker-compose.yml
+        mode: "0644"
+        content: |
+          version: "3.9"
+          services:
+            gitlab:
+              image: gitlab/gitlab-ce:latest
+              hostname: gitlab
+              restart: always
+              ports:
+                - "80:80"
+                - "443:443"
+                - "2222:22"
+              volumes:
+                - "{{ gitlab_data_dir }}/config:/etc/gitlab"
+                - "{{ gitlab_data_dir }}/logs:/var/log/gitlab"
+                - "{{ gitlab_data_dir }}/data:/var/opt/gitlab"
+              environment:
+                GITLAB_OMNIBUS_CONFIG: |
+                  external_url '{{ gitlab_external_url }}'
+                  gitlab_rails['gitlab_shell_ssh_port'] = 2222
+                  registry_external_url 'http://{{ ansible_host }}:5050'
+                  registry['enable'] = true
+                  registry['registry_http_addr'] = "0.0.0.0:5050"
+
+    - name: Start GitLab with Docker Compose
+      ansible.builtin.command: >
+        docker compose -f /root/gitlab-docker-compose.yml up -d
+
+# 3) Init Docker Swarm sur le manager
+- name: Init Docker Swarm manager
+  hosts: swarm_manager
+  become: true
+  vars:
+    swarm_advertise_addr: "{{ ansible_host }}"
+  tasks:
+    - name: Initialize Docker Swarm
+      command: >
+        docker swarm init --advertise-addr {{ swarm_advertise_addr }}
+      register: swarm_init
+      failed_when: swarm_init.rc not in [0, 1]
+      changed_when: swarm_init.rc == 0
+
+    - name: Get worker join token
+      command: docker swarm join-token -q worker
+      register: worker_token
+
+    - name: Set fact with worker token
+      set_fact:
+        swarm_worker_join_token: "{{ worker_token.stdout }}"
+
+# 4) Join des workers au Swarm
+- name: Join Swarm workers
+  hosts: swarm_workers
+  become: true
+  vars:
+    manager_ip: "{{ hostvars[groups['swarm_manager'][0]].ansible_host }}"
+    worker_token: "{{ hostvars[groups['swarm_manager'][0]].swarm_worker_join_token }}"
+  tasks:
+    - name: Join worker to Swarm
+      command: >
+        docker swarm join
+        --token {{ worker_token }}
+        {{ manager_ip }}:2377
+      register: join_result
+      failed_when: join_result.rc not in [0, 1]
+      changed_when: join_result.rc == 0
+
+# 5) Déploiement de l'application sur le Swarm
+#    (à adapter à ton projet : stack Docker depuis l'image de la registry GitLab)
+- name: Deploy application stack on Swarm
+  hosts: swarm_manager
+  become: true
+  vars:
+    stack_name: "sae6-app"
+    compose_file: "/root/sae6-stack.yml"
+  tasks:
+    - name: Copy application stack file
+      copy:
+        dest: "{{ compose_file }}"
+        mode: "0644"
+        content: |
+          version: "3.9"
+          services:
+            app:
+              image: "registry.gitlab.example.com/namespace/projet:latest"
+              deploy:
+                replicas: 3
+              ports:
+                - "8080:8080"
+    - name: Deploy stack
+      command: >
+        docker stack deploy -c {{ compose_file }} {{ stack_name }}
