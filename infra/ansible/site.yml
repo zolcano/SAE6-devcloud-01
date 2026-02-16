@@ -123,41 +123,41 @@
         swarm_worker_join_token: "{{ worker_token.stdout }}"
 
 # 4) Installation de gitlab-runner sur le manager Swarm
-- name: Install gitlab-runner on Swarm manager
+- name: Install GitLab Runner manually on Swarm manager
   hosts: swarm_manager
   become: true
+
   tasks:
-    - name: Install prerequisites for GitLab Runner repository
+    - name: Install dependencies
       apt:
         name:
           - curl
-          - ca-certificates
         state: present
         update_cache: true
 
-    - name: Add GitLab Runner GPG key
-      ansible.builtin.get_url:
-        url: https://packages.gitlab.com/runner/gitlab-runner/gpgkey
-        dest: /usr/share/keyrings/gitlab-runner.gpg
-        mode: "0644"
+    - name: Download GitLab Runner binary
+      get_url:
+        url: "https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-linux-amd64"
+        dest: /usr/local/bin/gitlab-runner
+        mode: '0755'
 
-    - name: Add GitLab Runner repository
-      ansible.builtin.apt_repository:
-        repo: "deb [signed-by=/usr/share/keyrings/gitlab-runner.gpg] https://packages.gitlab.com/runner/gitlab-runner/debian/ bookworm main"
-        state: present
-        filename: gitlab_runner
-
-    - name: Install GitLab Runner
-      ansible.builtin.apt:
+    - name: Create gitlab-runner user
+      user:
         name: gitlab-runner
-        state: present
-        update_cache: true
+        comment: GitLab Runner
+        shell: /bin/bash
+        create_home: yes
 
-    - name: Install gitlab-runner package
-      apt:
+    - name: Install GitLab Runner as a service
+      command: gitlab-runner install --user=gitlab-runner --working-directory=/home/gitlab-runner
+      args:
+        creates: /etc/systemd/system/gitlab-runner.service
+
+    - name: Start GitLab Runner service
+      systemd:
         name: gitlab-runner
-        state: present
-        update_cache: true
+        enabled: true
+        state: started
 
 # 5) Join des workers au Swarm
 - name: Join Swarm workers
