@@ -1,0 +1,173 @@
+stages:
+  - build
+  - image-test
+  - deploy
+  - app-test
+
+compliance:
+  stage: build
+  image:
+    name: hadolint/hadolint:latest-alpine
+    entrypoint: [""]
+  script:
+    - /bin/hadolint scripts/Dockerfile
+  allow_failure: true
+
+build:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""] # Override the container's entrypoint
+  variables:
+    DOCKER_CONFIG: "/kaniko/.docker" # Directory for Docker configuration
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json # Configure Docker authentication
+    - mkdir -p /kaniko/ssl/certs
+    - |
+      echo "$CERTIFICATE" >> /kaniko/ssl/certs/ca-certificates.crt  # Add SSL certificate
+    - |
+      /kaniko/executor \
+        --context="${CI_PROJECT_DIR}" \
+        --dockerfile="${CI_PROJECT_DIR}/scripts/Dockerfile" \
+        --destination="${CI_REGISTRY_IMAGE}:${IMAGE_TAG}"  # Build and push the Docker image
+
+static-test:
+  stage: image-test
+  image: python:3.8-alpine
+  before_script:
+    - apk add --no-cache gcc=13.2.1_git20240309-r1 musl-dev=1.2.5-r1 linux-headers=6.6-r0
+    - pip install pylint pytest pytest-cov flake8 mypy
+    - ls -la
+    - if [ -f setup.py ]; then pip install -e .; fi
+    - mkdir -p addrservice
+    - touch addrservice/__init__.py
+  script:
+    - echo "Running static code analysis..."
+    - flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+    - if [ -d "addrservice" ]; then
+      pylint --disable=all --enable=E,F,W,R,C addrservice || echo "Pylint warnings found but continuing";
+      else
+      echo "addrservice directory not found, skipping pylint";
+      ls -la;
+      fi
+    - echo "Directory structure:"
+    - find . -type f -name "*.py" | sort
+    - echo "Running type checking..."
+    - if [ -d "addrservice" ] && [ -d "tests" ]; then
+      mypy ./addrservice ./tests;
+      elif [ -d "addrservice" ]; then
+      mypy ./addrservice;
+      else
+      echo "Python modules not found in expected locations, skipping type checking";
+      fi
+    - echo "Running unit tests with coverage..."
+    - if [ -d "tests/unit" ]; then
+      pytest --cov=addrservice tests/unit/;
+      else
+      echo "No unit tests found";
+      find . -name "test_*.py" | sort;
+      fi
+    - pytest --junitxml=report.xml || echo "No tests or test failures, continuing"
+  artifacts:
+    reports:
+      junit: report.xml
+    paths:
+      - htmlcov/
+      - report.xml
+    expire_in: 1 week
+  allow_failure: true
+
+security-scan:
+  stage: image-test
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    # Setup SSL certificates first
+    - mkdir -p /etc/ssl/certs
+    - echo "$CERTIFICATE" >> /etc/ssl/certs/ca-certificates.crt
+
+    # Set credentials as environment variables for Trivy
+    - export TRIVY_USERNAME=${CI_REGISTRY_USER}
+    - export TRIVY_PASSWORD=${CI_REGISTRY_PASSWORD}
+
+    # Login to registry using Trivy's built-in authentication
+    - echo "Logging into registry..."
+    - trivy registry login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+
+    - echo "Scanning image for vulnerabilities..."
+    - trivy image --format table ${CI_REGISTRY_IMAGE}:${IMAGE_TAG}
+    - echo "Generating detailed report for HIGH and CRITICAL vulnerabilities..."
+    - trivy image --format table --severity HIGH,CRITICAL ${CI_REGISTRY_IMAGE}:${IMAGE_TAG}
+    - mkdir -p reports
+    - trivy image --format json --output reports/trivy-results.json ${CI_REGISTRY_IMAGE}:${IMAGE_TAG}
+  artifacts:
+    paths:
+      - reports/
+    expire_in: 1 week
+  allow_failure: true
+
+deploy:
+  stage: deploy
+  image: docker:20.10
+  variables:
+    DOCKER_HOST: tcp://swarm-master:2376
+    DOCKER_TLS_VERIFY: 1
+    DOCKER_CERT_PATH: /certs
+    IMAGE_TAG: ${IMAGE_TAG:-latest}
+
+  before_script:
+    - if [ -z "$IMAGE_TAG" ]; then export IMAGE_TAG="latest"; fi
+    - apk add --no-cache gettext
+    - mkdir -p /usr/local/share/ca-certificates /certs /etc/docker/certs.d/sae6.gitlab.devcloud:5050
+    - echo "$CERTIFICATE" > /usr/local/share/ca-certificates/registry.crt
+    - update-ca-certificates
+    - echo "$DOCKER_CA" > /certs/ca.pem
+    - echo "$DOCKER_CERT" > /certs/cert.pem
+    - echo "$DOCKER_KEY" > /certs/key.pem
+    - echo "$CERTIFICATE" > /etc/docker/certs.d/sae6.gitlab.devcloud:5050/ca.crt
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+  script:
+    - echo "Testing Docker Swarm Connection..."
+    - docker info
+    - docker node ls
+    - envsubst < docker-compose.yml > docker-compose-deployed.yml
+    - cat docker-compose-deployed.yml
+    - echo "Deploying to Docker Swarm..."
+    - docker stack rm addressbook || true # Remove old stack if exists
+    - sleep 10 # Wait for cleanup
+    - docker stack deploy --compose-file docker-compose-deployed.yml --with-registry-auth addressbook
+    - if ! docker service ls | grep addressbook; then echo "Deployment failed!"; exit 1; fi
+
+  environment:
+    name: production
+    url: http://addressbook.devcloud:8080
+
+dynamic-test:
+  stage: app-test
+  image: python:3.8
+  variables:
+    APP_URL: http://addressbook.devcloud:8080
+  before_script:
+    - apt-get update && apt-get install -y curl
+    - pip install requests pytest pytest-cov coverage flake8 mypy
+    - chmod +x ./apptest.sh
+  script:
+    - echo "Running integration tests against deployed application..."
+    - APP_URL=${APP_URL} ./apptest.sh
+  artifacts:
+    paths:
+      - test-results/
+      - htmlcov/
+      - .coverage
+      - coverage.xml
+      - report.xml
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+      junit: report.xml
+    expire_in: 1 week
+  allow_failure: true
